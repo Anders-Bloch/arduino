@@ -32,6 +32,12 @@ AccelStepper stepperY(AccelStepper::HALF4WIRE, 2, 4, 3, 5);
 
 long mmToSteps(float mm) { return (long)(mm * STEPS_PER_MM); }
 
+// --- G-code parser state ---
+// Current machine position in mm (absolute coordinates)
+float curX        = 0.0;
+float curY        = 0.0;
+bool  absoluteMode = true;  // G90 = absolute (default), G91 = relative
+
 // Synchronised move: both axes start and finish at the same time.
 // The longer axis runs at MAX_SPEED_MM_S; the shorter axis is slowed
 // proportionally so the travel time is identical for both.
@@ -64,11 +70,6 @@ void waitForMove() {
 }
 
 // --- G-code parser ---
-// Current machine position in mm (absolute coordinates)
-float curX        = 0.0;
-float curY        = 0.0;
-bool  absoluteMode = true;  // G90 = absolute (default), G91 = relative
-
 // Return the numeric value following 'param' in 'line', or defaultVal if absent
 float parseParam(const char* line, char param, float defaultVal) {
   const char* p = strchr(line, param);
