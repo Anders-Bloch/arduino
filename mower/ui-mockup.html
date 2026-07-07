@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+  <title>Robot Mower – UI Mockup</title>
+  <style>
+    :root{
+      --bg:#0d1117;--card:#161b22;--border:#30363d;
+      --accent:#58a6ff;--green:#3fb950;--red:#f85149;--orange:#d29922;
+      --text:#c9d1d9;--muted:#8b949e;
+    }
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:var(--bg);color:var(--text);
+         font-family:-apple-system,Arial,sans-serif;
+         padding:16px;max-width:400px;margin:auto;
+         user-select:none;-webkit-user-select:none}
+    h1{text-align:center;color:var(--accent);font-size:1.4rem;
+       margin-bottom:6px;padding-top:8px}
+    .sub{text-align:center;font-size:.85rem;color:var(--muted);margin-bottom:16px}
+    #cmdlabel{font-weight:700;color:var(--accent)}
+    .card{background:var(--card);border:1px solid var(--border);
+          border-radius:10px;padding:16px;margin-bottom:14px}
+    .srow{display:flex;justify-content:space-between;
+          margin-bottom:8px;font-size:.85rem;color:var(--muted)}
+    input[type=range]{width:100%;height:28px;accent-color:var(--accent)}
+
+    /* D-pad */
+    .dpad{display:grid;grid-template-columns:repeat(3,1fr);
+          grid-template-rows:repeat(3,1fr);gap:10px;
+          max-width:260px;margin:0 auto;aspect-ratio:1}
+    .dpad button{border:none;border-radius:10px;font-size:1.7rem;
+                 cursor:pointer;background:#21262d;color:var(--text);
+                 transition:filter .1s;touch-action:none;
+                 display:flex;align-items:center;justify-content:center}
+    .dpad button:active,.dpad button.held{filter:brightness(.5)}
+    #btn-fwd  {background:#132b13;color:var(--green)}
+    #btn-bwd  {background:#2b1313;color:var(--red)}
+    #btn-left {background:#13202b;color:var(--accent)}
+    #btn-right{background:#13202b;color:var(--accent)}
+    .btn-stp  {background:#2b2510 !important;color:var(--orange) !important}
+    .empty    {background:transparent !important;pointer-events:none}
+
+    /* Emergency stop */
+    .estop{width:100%;padding:18px;background:#7f1d1d;color:#fff;
+           border:2px solid #991b1b;border-radius:10px;font-size:1.1rem;
+           font-weight:800;cursor:pointer;touch-action:none;letter-spacing:.04em}
+    .estop:active{background:#991b1b}
+
+    /* Mockup log */
+    .log-card{margin-top:14px}
+    .log-card h3{font-size:.8rem;color:var(--muted);margin-bottom:8px;
+                 letter-spacing:.06em;text-transform:uppercase}
+    #log{font-size:.78rem;color:#6e7681;font-family:monospace;
+         max-height:140px;overflow-y:auto;line-height:1.6}
+    #log .entry{border-bottom:1px solid #21262d;padding:2px 0}
+    #log .entry span{color:var(--accent)}
+    .badge{display:inline-block;font-size:.7rem;padding:1px 6px;
+           border-radius:4px;margin-left:6px;font-weight:700;vertical-align:middle}
+    .badge-mock{background:#1f2d1f;color:var(--green)}
+  </style>
+</head>
+<body>
+
+  <h1>&#129302; Robot Mower <span class="badge badge-mock">MOCKUP</span></h1>
+  <p class="sub">Command: <span id="cmdlabel">STOP</span></p>
+
+  <!-- Speed -->
+  <div class="card">
+    <div class="srow"><span>Speed</span><span id="sv">50 %</span></div>
+    <input type="range" min="5" max="100" value="50" id="sl"
+           oninput="setSpd(this.value)" onchange="setSpd(this.value)">
+  </div>
+
+  <!-- D-pad -->
+  <div class="card">
+    <div class="dpad">
+      <div class="empty"></div>
+      <button id="btn-fwd"
+              onpointerdown="hold(event,'fwd')"   onpointerup="release(event)"
+              onpointercancel="release(event)">&#9650;</button>
+      <div class="empty"></div>
+
+      <button id="btn-left"
+              onpointerdown="hold(event,'left')"  onpointerup="release(event)"
+              onpointercancel="release(event)">&#9664;</button>
+      <button class="btn-stp"
+              onpointerdown="release(event)">&#9632;</button>
+      <button id="btn-right"
+              onpointerdown="hold(event,'right')" onpointerup="release(event)"
+              onpointercancel="release(event)">&#9654;</button>
+
+      <div class="empty"></div>
+      <button id="btn-bwd"
+              onpointerdown="hold(event,'bwd')"   onpointerup="release(event)"
+              onpointercancel="release(event)">&#9660;</button>
+      <div class="empty"></div>
+    </div>
+  </div>
+
+  <button class="estop" onpointerdown="eStop()">
+    &#9888;&nbsp; EMERGENCY STOP
+  </button>
+
+  <!-- Mock request log -->
+  <div class="card log-card">
+    <h3>Simulated HTTP requests</h3>
+    <div id="log"></div>
+  </div>
+
+  <script>
+    let holdTimer = null;
+    let activeCmd = null;
+    const REPEAT_MS = 350;
+
+    /* ── Mock fetch: log requests instead of sending them ── */
+    function get(url) {
+      const now = new Date().toLocaleTimeString('en', {hour12:false});
+      const log = document.getElementById('log');
+      const div = document.createElement('div');
+      div.className = 'entry';
+      div.innerHTML = `<span>${now}</span>  GET ${url}`;
+      log.prepend(div);
+      // Keep at most 30 entries
+      while (log.children.length > 30) log.removeChild(log.lastChild);
+    }
+
+    function setSpd(v) {
+      document.getElementById('sv').innerText = v + ' %';
+      get('/speed?val=' + v);
+    }
+
+    function sendCmd(cmd) {
+      document.getElementById('cmdlabel').innerText = cmd.toUpperCase();
+      get('/drive?cmd=' + cmd);
+    }
+
+    function hold(e, cmd) {
+      e.currentTarget.setPointerCapture(e.pointerId);
+      if (holdTimer) clearInterval(holdTimer);
+      if (activeCmd) {
+        const prev = document.getElementById('btn-' + activeCmd);
+        if (prev) prev.classList.remove('held');
+      }
+      activeCmd = cmd;
+      document.getElementById('btn-' + cmd).classList.add('held');
+      sendCmd(cmd);
+      holdTimer = setInterval(() => sendCmd(cmd), REPEAT_MS);
+    }
+
+    function release(e) {
+      if (e) try { e.currentTarget.releasePointerCapture(e.pointerId); } catch(_) {}
+      clearInterval(holdTimer);
+      holdTimer = null;
+      if (activeCmd) {
+        const el = document.getElementById('btn-' + activeCmd);
+        if (el) el.classList.remove('held');
+        activeCmd = null;
+      }
+      document.getElementById('cmdlabel').innerText = 'STOP';
+      get('/drive?cmd=stop');
+    }
+
+    function eStop() {
+      release(null);
+      get('/stop');
+    }
+  </script>
+</body>
+</html>
