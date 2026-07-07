@@ -26,7 +26,7 @@
  *  MOSFET VCC / Relay VCC → ESP32 5 V (or external 5 V)
  *  All GNDs must share a common ground with the ESP32.
  *
- * Compatible with ESP32 Arduino Core v2.x
+ * Compatible with ESP32 Arduino Core v3.x
  * Board in Arduino IDE: "ESP32 Dev Module"
  * ──────────────────────────────────────────────────────────────
  */
@@ -59,8 +59,7 @@ const bool RIGHT_INVERT = false;
 // ── PWM ─────────────────────────────────────────────────────
 const int PWM_FREQ       = 5000;   // Hz
 const int PWM_RESOLUTION = 8;      // bits → 0–255
-const int PWM_CH1        = 0;
-const int PWM_CH2        = 1;
+// Core v3.x uses pin-based ledcAttach()/ledcWrite() – no channel numbers needed.
 
 // Safety delay (ms) between stopping motor and switching relay direction
 const int DIR_CHANGE_DELAY_MS = 80;
@@ -239,10 +238,10 @@ static inline void relaySet(int pin, bool activate) {
 }
 
 // Immediately cut a motor to 0 (bypasses ramp)
-static inline void motorCut(int channel, int& speed, int& target) {
+static inline void motorCut(int pin, int& speed, int& target) {
     speed  = 0;
     target = 0;
-    ledcWrite(channel, 0);
+    ledcWrite(pin, 0);
 }
 
 // Non-blocking ramp – call every loop iteration
@@ -261,11 +260,11 @@ void rampMotors() {
 
     if (m1Speed != m1Target) {
         m1Speed = step(m1Speed, m1Target);
-        ledcWrite(PWM_CH1, m1Speed);
+        ledcWrite(M1_PWM_PIN, m1Speed);
     }
     if (m2Speed != m2Target) {
         m2Speed = step(m2Speed, m2Target);
-        ledcWrite(PWM_CH2, m2Speed);
+        ledcWrite(M2_PWM_PIN, m2Speed);
     }
 }
 
@@ -293,12 +292,12 @@ void handleSpeed() {
 void handleStop() {
     if (!server.hasArg("motor")) {
         // No motor specified – stop both
-        motorCut(PWM_CH1, m1Speed, m1Target);
-        motorCut(PWM_CH2, m2Speed, m2Target);
+        motorCut(M1_PWM_PIN, m1Speed, m1Target);
+        motorCut(M2_PWM_PIN, m2Speed, m2Target);
     } else {
         int motor = server.arg("motor").toInt();
-        if (motor == 1)      motorCut(PWM_CH1, m1Speed, m1Target);
-        else if (motor == 2) motorCut(PWM_CH2, m2Speed, m2Target);
+        if (motor == 1)      motorCut(M1_PWM_PIN, m1Speed, m1Target);
+        else if (motor == 2) motorCut(M2_PWM_PIN, m2Speed, m2Target);
         else { server.send(400, "text/plain", "Invalid motor"); return; }
     }
     server.send(200, "text/plain", "OK");
@@ -337,13 +336,13 @@ void handleDrive() {
 
     // Switch relay if direction changed – always stop first
     if (m1Fwd != newM1Fwd) {
-        motorCut(PWM_CH1, m1Speed, m1Target);
+        motorCut(M1_PWM_PIN, m1Speed, m1Target);
         delay(DIR_CHANGE_DELAY_MS);
         m1Fwd = newM1Fwd;
         relaySet(M1_DIR_PIN, !(newM1Fwd ^ LEFT_INVERT));
     }
     if (m2Fwd != newM2Fwd) {
-        motorCut(PWM_CH2, m2Speed, m2Target);
+        motorCut(M2_PWM_PIN, m2Speed, m2Target);
         delay(DIR_CHANGE_DELAY_MS);
         m2Fwd = newM2Fwd;
         relaySet(M2_DIR_PIN, !(newM2Fwd ^ RIGHT_INVERT));
@@ -360,8 +359,8 @@ void handleDrive() {
 void checkWatchdog() {
     if ((m1Target > 0 || m2Target > 0) &&
         (millis() - lastCmdMs > WATCHDOG_MS)) {
-        motorCut(PWM_CH1, m1Speed, m1Target);
-        motorCut(PWM_CH2, m2Speed, m2Target);
+        motorCut(M1_PWM_PIN, m1Speed, m1Target);
+        motorCut(M2_PWM_PIN, m2Speed, m2Target);
         Serial.println("WATCHDOG: motors stopped");
     }
 }
@@ -380,14 +379,12 @@ void setup() {
     relaySet(M1_DIR_PIN, !(true ^ LEFT_INVERT));
     relaySet(M2_DIR_PIN, !(true ^ RIGHT_INVERT));
 
-    // PWM channels
-    ledcSetup(PWM_CH1, PWM_FREQ, PWM_RESOLUTION);
-    ledcAttachPin(M1_PWM_PIN, PWM_CH1);
-    ledcWrite(PWM_CH1, 0);
+    // PWM channels (Core v3.x: pin-based, no channel numbers)
+    ledcAttach(M1_PWM_PIN, PWM_FREQ, PWM_RESOLUTION);
+    ledcWrite(M1_PWM_PIN, 0);
 
-    ledcSetup(PWM_CH2, PWM_FREQ, PWM_RESOLUTION);
-    ledcAttachPin(M2_PWM_PIN, PWM_CH2);
-    ledcWrite(PWM_CH2, 0);
+    ledcAttach(M2_PWM_PIN, PWM_FREQ, PWM_RESOLUTION);
+    ledcWrite(M2_PWM_PIN, 0);
 
     // Start WiFi Access Point
     WiFi.softAP(AP_SSID, AP_PASSWORD);
