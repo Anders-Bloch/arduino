@@ -68,6 +68,11 @@ const int DIR_CHANGE_DELAY_MS = 80;
 // (safety net if the phone disconnects while the mower is running)
 const unsigned long WATCHDOG_MS = 2000;
 
+// If the motor runs at full speed with no signal (active-LOW module:
+// HIGH = off, LOW = full speed), set this to true.
+// Set to false for standard active-HIGH modules.
+const bool MOSFET_INVERT = true;
+
 // ── Soft-start ramp ──────────────────────────────────────────
 const int RAMP_UP_STEP   = 3;    // PWM units per tick when accelerating (0–255)
 const int RAMP_DOWN_STEP = 6;    // PWM units per tick when decelerating
@@ -237,11 +242,16 @@ static inline void relaySet(int pin, bool activate) {
     digitalWrite(pin, activate ? RELAY_ACTIVE_LEVEL : !RELAY_ACTIVE_LEVEL);
 }
 
+// PWM write – inverts duty cycle for active-LOW MOSFET modules
+static inline void pwmWrite(int pin, int duty) {
+    ledcWrite(pin, MOSFET_INVERT ? (255 - duty) : duty);
+}
+
 // Immediately cut a motor to 0 (bypasses ramp)
 static inline void motorCut(int pin, int& speed, int& target) {
     speed  = 0;
     target = 0;
-    ledcWrite(pin, 0);
+    pwmWrite(pin, 0);
 }
 
 // Non-blocking ramp – call every loop iteration
@@ -260,11 +270,11 @@ void rampMotors() {
 
     if (m1Speed != m1Target) {
         m1Speed = step(m1Speed, m1Target);
-        ledcWrite(M1_PWM_PIN, m1Speed);
+        pwmWrite(M1_PWM_PIN, m1Speed);
     }
     if (m2Speed != m2Target) {
         m2Speed = step(m2Speed, m2Target);
-        ledcWrite(M2_PWM_PIN, m2Speed);
+        pwmWrite(M2_PWM_PIN, m2Speed);
     }
 }
 
@@ -381,10 +391,10 @@ void setup() {
 
     // PWM channels (Core v3.x: pin-based, no channel numbers)
     ledcAttach(M1_PWM_PIN, PWM_FREQ, PWM_RESOLUTION);
-    ledcWrite(M1_PWM_PIN, 0);
+    pwmWrite(M1_PWM_PIN, 0);
 
     ledcAttach(M2_PWM_PIN, PWM_FREQ, PWM_RESOLUTION);
-    ledcWrite(M2_PWM_PIN, 0);
+    pwmWrite(M2_PWM_PIN, 0);
 
     // Start WiFi Access Point
     WiFi.softAP(AP_SSID, AP_PASSWORD);
