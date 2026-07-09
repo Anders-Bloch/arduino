@@ -13,37 +13,19 @@
  *
  * Wiring guide
  * ──────────────────────────────────────────────────────────────
- *  Each motor uses two SPDT relays wired as a DPDT H-bridge:
- *    Relay A routes the MOSFET output (+PWM) to Motor A or B.
- *    Relay B routes Battery− (GND) to the opposite terminal.
- *    Both relay coils are driven from the SAME direction GPIO.
- *
  *  LEFT wheel motor
- *    ESP32 GPIO 25   → MOSFET TRIG/PWM
- *    ESP32 GPIO 26   → Relay-A1 IN  (and Relay-B1 IN, wired in parallel)
- *
- *    MOSFET OUT+     → Relay-A1 COM
- *    Relay-A1 NO     → Motor-L Terminal A   (relays OFF = forward)
- *    Relay-A1 NC     → Motor-L Terminal B   (relays ON  = reverse)
- *
- *    Battery− (GND)  → Relay-B1 COM
- *    Relay-B1 NO     → Motor-L Terminal B   (forward return path)
- *    Relay-B1 NC     → Motor-L Terminal A   (reverse return path)
+ *    ESP32 GPIO 25  → MOSFET TRIG/PWM
+ *    MOSFET VIN+    → Battery+ (12 V)
+ *    MOSFET VIN−    → Battery− (GND)
+ *    MOSFET OUT+    → Motor-L positive terminal
+ *    MOSFET OUT−    → Motor-L negative terminal
  *
  *  RIGHT wheel motor
- *    ESP32 GPIO 32   → MOSFET TRIG/PWM
- *    ESP32 GPIO 33   → Relay-A2 IN  (and Relay-B2 IN, wired in parallel)
- *
- *    MOSFET OUT+     → Relay-A2 COM
- *    Relay-A2 NO     → Motor-R Terminal A   (relays OFF = forward)
- *    Relay-A2 NC     → Motor-R Terminal B   (relays ON  = reverse)
- *
- *    Battery− (GND)  → Relay-B2 COM
- *    Relay-B2 NO     → Motor-R Terminal B   (forward return path)
- *    Relay-B2 NC     → Motor-R Terminal A   (reverse return path)
- *
- *  MOSFET VCC / Relay VCC → ESP32 5 V (or external 5 V)
- *  All GNDs must share a common ground with the ESP32.
+ *    ESP32 GPIO 32  → MOSFET TRIG/PWM
+ *    MOSFET VIN+    → Battery+ (12 V)
+ *    MOSFET VIN−    → Battery− (GND)
+ *    MOSFET OUT+    → Motor-R positive terminal
+ *    MOSFET OUT−    → Motor-R negative terminal
  *
  * Compatible with ESP32 Arduino Core v3.x
  * Board in Arduino IDE: "ESP32 Dev Module"
@@ -58,30 +40,13 @@ const char* AP_SSID     = "MowerControl";
 const char* AP_PASSWORD = "mower1234";   // ≥8 chars; use "" for open network
 
 // ── Pin assignments  (adjust to your wiring) ─────────────────
-//  LEFT wheel motor
-const int M1_PWM_PIN = 25;   // MOSFET TRIG/PWM
-const int M1_DIR_PIN = 26;   // Relay-A1 IN + Relay-B1 IN (both coils in parallel)
-
-//  RIGHT wheel motor
-const int M2_PWM_PIN = 32;   // MOSFET TRIG/PWM
-const int M2_DIR_PIN = 33;   // Relay-A2 IN + Relay-B2 IN (both coils in parallel)
-
-// Most optocoupler relay modules activate on LOW.
-// Change to HIGH if your module activates on HIGH.
-const int RELAY_ACTIVE_LEVEL = LOW;
-
-// If a wheel spins the wrong way for "forward", set its flag to true
-// instead of rewiring the motor terminals.
-const bool LEFT_INVERT  = false;
-const bool RIGHT_INVERT = false;
+const int M1_PWM_PIN = 25;   // LEFT  motor – MOSFET TRIG/PWM
+const int M2_PWM_PIN = 32;   // RIGHT motor – MOSFET TRIG/PWM
 
 // ── PWM ─────────────────────────────────────────────────────
 const int PWM_FREQ       = 5000;   // Hz
 const int PWM_RESOLUTION = 8;      // bits → 0–255
 // Core v3.x uses pin-based ledcAttach()/ledcWrite() – no channel numbers needed.
-
-// Safety delay (ms) between stopping motor and switching relay direction
-const int DIR_CHANGE_DELAY_MS = 80;
 
 // Watchdog: cut motors if no /drive command received within this many ms
 // (safety net if the phone disconnects while the mower is running)
@@ -102,11 +67,8 @@ int  driveSpeed = 128;   // shared speed for both motors (0–255, default 50 %)
 
 int  m1Speed  = 0;    // LEFT  – current PWM (0–255)
 int  m1Target = 0;    // LEFT  – desired PWM (ramp steps toward this)
-bool m1Fwd    = true; // LEFT  – current relay direction
-
 int  m2Speed  = 0;    // RIGHT – current PWM
 int  m2Target = 0;    // RIGHT – desired PWM
-bool m2Fwd    = true; // RIGHT – current relay direction
 
 unsigned long lastRampMs = 0;
 unsigned long lastCmdMs  = 0;  // reset by every /drive command (watchdog)
@@ -193,9 +155,7 @@ static const char HTML[] PROGMEM = R"rawliteral(
               onpointercancel="release(event)">&#9654;</button>
 
       <div class="empty"></div>
-      <button id="btn-bwd"
-              onpointerdown="hold(event,'bwd')"   onpointerup="release(event)"
-              onpointercancel="release(event)">&#9660;</button>
+      <div class="empty"></div>
       <div class="empty"></div>
     </div>
   </div>
@@ -257,10 +217,6 @@ static const char HTML[] PROGMEM = R"rawliteral(
 )rawliteral";
 
 // ── Helpers ──────────────────────────────────────────────────
-static inline void relaySet(int pin, bool activate) {
-    digitalWrite(pin, activate ? RELAY_ACTIVE_LEVEL : !RELAY_ACTIVE_LEVEL);
-}
-
 // PWM write – inverts duty cycle for active-LOW MOSFET modules
 static inline void pwmWrite(int pin, int duty) {
     ledcWrite(pin, MOSFET_INVERT ? (255 - duty) : duty);
@@ -340,46 +296,30 @@ void handleDrive() {
     String cmd = server.arg("cmd");
 
     // Whitelist valid commands to prevent injection
-    if (cmd != "fwd" && cmd != "bwd" && cmd != "left" &&
-        cmd != "right" && cmd != "stop") {
+    if (cmd != "fwd" && cmd != "left" && cmd != "right" && cmd != "stop") {
         server.send(400, "text/plain", "Invalid command");
         return;
     }
 
     lastCmdMs = millis();   // reset watchdog
 
-    if (cmd == "stop") {
+    //   fwd   → both motors run
+    //   left  → left motor stops,  right motor runs  (skid-steer left)
+    //   right → left motor runs,   right motor stops (skid-steer right)
+    //   stop  → both motors stop
+    if (cmd == "fwd") {
+        m1Target = driveSpeed;
+        m2Target = driveSpeed;
+    } else if (cmd == "left") {
+        m1Target = 0;
+        m2Target = driveSpeed;
+    } else if (cmd == "right") {
+        m1Target = driveSpeed;
+        m2Target = 0;
+    } else {
         m1Target = 0;
         m2Target = 0;
-        server.send(200, "text/plain", "OK");
-        return;
     }
-
-    // Map drive command to per-motor forward/backward intent:
-    //   fwd   → left:fwd   right:fwd    (straight forward)
-    //   bwd   → left:bwd   right:bwd    (straight backward)
-    //   left  → left:bwd   right:fwd    (pivot left)
-    //   right → left:fwd   right:bwd    (pivot right)
-    bool newM1Fwd = (cmd == "fwd" || cmd == "right");
-    bool newM2Fwd = (cmd == "fwd" || cmd == "left");
-
-    // Switch relay if direction changed – always stop first
-    if (m1Fwd != newM1Fwd) {
-        motorCut(M1_PWM_PIN, m1Speed, m1Target);
-        delay(DIR_CHANGE_DELAY_MS);
-        m1Fwd = newM1Fwd;
-        relaySet(M1_DIR_PIN, !(newM1Fwd ^ LEFT_INVERT));
-    }
-    if (m2Fwd != newM2Fwd) {
-        motorCut(M2_PWM_PIN, m2Speed, m2Target);
-        delay(DIR_CHANGE_DELAY_MS);
-        m2Fwd = newM2Fwd;
-        relaySet(M2_DIR_PIN, !(newM2Fwd ^ RIGHT_INVERT));
-    }
-
-    // Set speed targets – rampMotors() steps toward them each tick
-    m1Target = driveSpeed;
-    m2Target = driveSpeed;
 
     server.send(200, "text/plain", "OK");
 }
@@ -401,12 +341,6 @@ void handleNotFound() {
 // ── Setup ─────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
-
-    // Relay pins – start in forward direction (respects INVERT flags)
-    pinMode(M1_DIR_PIN, OUTPUT);
-    pinMode(M2_DIR_PIN, OUTPUT);
-    relaySet(M1_DIR_PIN, !(true ^ LEFT_INVERT));
-    relaySet(M2_DIR_PIN, !(true ^ RIGHT_INVERT));
 
     // PWM channels (Core v3.x: pin-based, no channel numbers)
     ledcAttach(M1_PWM_PIN, PWM_FREQ, PWM_RESOLUTION);
