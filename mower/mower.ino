@@ -13,15 +13,34 @@
  *
  * Wiring guide
  * ──────────────────────────────────────────────────────────────
+ *  Each motor uses two SPDT relays wired as a DPDT H-bridge:
+ *    Relay A routes the MOSFET output (+PWM) to Motor A or B.
+ *    Relay B routes Battery− (GND) to the opposite terminal.
+ *    Both relay coils are driven from the SAME direction GPIO.
+ *
  *  LEFT wheel motor
- *    ESP32 GPIO 25  → MOSFET module  PWM/SIG input
- *    ESP32 GPIO 26  → Relay module   IN  pin
- *    Relay NO + COM → left motor terminals (swaps polarity for reverse)
+ *    ESP32 GPIO 25   → MOSFET TRIG/PWM
+ *    ESP32 GPIO 26   → Relay-A1 IN  (and Relay-B1 IN, wired in parallel)
+ *
+ *    MOSFET OUT+     → Relay-A1 COM
+ *    Relay-A1 NO     → Motor-L Terminal A   (relays OFF = forward)
+ *    Relay-A1 NC     → Motor-L Terminal B   (relays ON  = reverse)
+ *
+ *    Battery− (GND)  → Relay-B1 COM
+ *    Relay-B1 NO     → Motor-L Terminal B   (forward return path)
+ *    Relay-B1 NC     → Motor-L Terminal A   (reverse return path)
  *
  *  RIGHT wheel motor
- *    ESP32 GPIO 32  → MOSFET module  PWM/SIG input
- *    ESP32 GPIO 33  → Relay module   IN  pin
- *    Relay NO + COM → right motor terminals
+ *    ESP32 GPIO 32   → MOSFET TRIG/PWM
+ *    ESP32 GPIO 33   → Relay-A2 IN  (and Relay-B2 IN, wired in parallel)
+ *
+ *    MOSFET OUT+     → Relay-A2 COM
+ *    Relay-A2 NO     → Motor-R Terminal A   (relays OFF = forward)
+ *    Relay-A2 NC     → Motor-R Terminal B   (relays ON  = reverse)
+ *
+ *    Battery− (GND)  → Relay-B2 COM
+ *    Relay-B2 NO     → Motor-R Terminal B   (forward return path)
+ *    Relay-B2 NC     → Motor-R Terminal A   (reverse return path)
  *
  *  MOSFET VCC / Relay VCC → ESP32 5 V (or external 5 V)
  *  All GNDs must share a common ground with the ESP32.
@@ -40,12 +59,12 @@ const char* AP_PASSWORD = "mower1234";   // ≥8 chars; use "" for open network
 
 // ── Pin assignments  (adjust to your wiring) ─────────────────
 //  LEFT wheel motor
-const int M1_PWM_PIN = 25;   // MOSFET signal
-const int M1_DIR_PIN = 26;   // Relay IN
+const int M1_PWM_PIN = 25;   // MOSFET TRIG/PWM
+const int M1_DIR_PIN = 26;   // Relay-A1 IN + Relay-B1 IN (both coils in parallel)
 
 //  RIGHT wheel motor
-const int M2_PWM_PIN = 32;   // MOSFET signal
-const int M2_DIR_PIN = 33;   // Relay IN
+const int M2_PWM_PIN = 32;   // MOSFET TRIG/PWM
+const int M2_DIR_PIN = 33;   // Relay-A2 IN + Relay-B2 IN (both coils in parallel)
 
 // Most optocoupler relay modules activate on LOW.
 // Change to HIGH if your module activates on HIGH.
