@@ -2,8 +2,7 @@
  * ESP32 Robot Mower Controller
  * ============================
  * Differential-drive robot mower using two 31zy 12 V DC motors:
- *   - MOSFET PWM driver modules  → speed (0–100 %)
- *   - Single-channel relay modules → direction (forward / reverse)
+ *   - One L298N dual H-bridge module → speed (PWM) + direction (IN1–IN4)
  *
  * Access Point mode – no router needed.
  * 1. Connect your phone to the "MowerControl" WiFi network.
@@ -11,22 +10,28 @@
  * 3. Hold a direction button to drive; release to stop.
  *    A 2-second watchdog cuts the motors if the connection drops.
  *
- * Wiring guide
+ * Wiring guide (L298N module)
  * ──────────────────────────────────────────────────────────────
- *  LEFT wheel motor
- *    ESP32 GPIO 25  → MOSFET TRIG/PWM
- *    MOSFET VIN+    → Battery+ (12 V)
- *    MOSFET VIN−    → Battery− (GND)
- *    MOSFET OUT+    → Motor-L positive terminal
- *    MOSFET OUT−    → Motor-L negative terminal
+ *  L298N power
+ *    12 V Battery+  → L298N VCC (motor power)
+ *    Battery− (GND) → L298N GND
+ *    Remove ENA and ENB jumpers – connect to ESP32 instead.
  *
- *  RIGHT wheel motor
- *    ESP32 GPIO 32  → MOSFET TRIG/PWM
- *    MOSFET VIN+    → Battery+ (12 V)
- *    MOSFET VIN−    → Battery− (GND)
- *    MOSFET OUT+    → Motor-R positive terminal
- *    MOSFET OUT−    → Motor-R negative terminal
+ *  LEFT motor (Motor A on L298N)
+ *    ESP32 GPIO 25  → L298N ENA  (PWM speed)
+ *    ESP32 GPIO 26  → L298N IN1  (direction)
+ *    ESP32 GPIO 27  → L298N IN2  (direction)
+ *    L298N OUT1 + OUT2  → Left motor terminals
  *
+ *  RIGHT motor (Motor B on L298N)
+ *    ESP32 GPIO 32  → L298N ENB  (PWM speed)
+ *    ESP32 GPIO 33  → L298N IN3  (direction)
+ *    ESP32 GPIO 14  → L298N IN4  (direction)
+ *    L298N OUT3 + OUT4  → Right motor terminals
+ *
+ *  ESP32 GND  → L298N GND  (common ground)
+ *  NOTE: L298N logic runs on 5 V – 3.3 V ESP32 signals are usually sufficient.
+ *  If a motor runs the wrong way, swap its two L298N OUT wires.
  * Compatible with ESP32 Arduino Core v3.x
  * Board in Arduino IDE: "ESP32 Dev Module"
  * ──────────────────────────────────────────────────────────────
@@ -39,14 +44,29 @@
 const char* AP_SSID     = "MowerControl";
 const char* AP_PASSWORD = "mower1234";   // ≥8 chars; use "" for open network
 
-// ── Pin assignments  (adjust to your wiring) ─────────────────
-const int M1_PWM_PIN = 25;   // LEFT  motor – MOSFET TRIG/PWM
-const int M2_PWM_PIN = 32;   // RIGHT motor – MOSFET TRIG/PWM
+// ── Pin assignments  (adjust to match your wiring) ───────────────
+//  LEFT motor  – L298N Motor A
+const int M1_ENA = 25;   // ENA  – PWM speed
+const int M1_IN1 = 26;   // IN1  – direction
+const int M1_IN2 = 27;   // IN2  – direction
 
-// ── PWM ─────────────────────────────────────────────────────
+//  RIGHT motor – L298N Motor B
+const int M2_ENB = 32;   // ENB  – PWM speed
+const int M2_IN3 = 33;   // IN3  – direction
+const int M2_IN4 = 14;   // IN4  – direction
+
+// If a motor runs the wrong way, set its flag to true
+// (swaps IN1/IN2 or IN3/IN4 in software instead of rewiring).
+const bool LEFT_INVERT  = false;
+const bool RIGHT_INVERT = false;
+
+// ── PWM ───────────────────────────────────────────────────
 const int PWM_FREQ       = 5000;   // Hz
 const int PWM_RESOLUTION = 8;      // bits → 0–255
 // Core v3.x uses pin-based ledcAttach()/ledcWrite() – no channel numbers needed.
+
+// Safety delay (ms) after stopping before changing motor direction
+const int DIR_CHANGE_DELAY_MS = 50;
 
 // Watchdog: cut motors if no /drive command received within this many ms
 // (safety net if the phone disconnects while the mower is running)
@@ -67,8 +87,11 @@ int  driveSpeed = 128;   // shared speed for both motors (0–255, default 50 %)
 
 int  m1Speed  = 0;    // LEFT  – current PWM (0–255)
 int  m1Target = 0;    // LEFT  – desired PWM (ramp steps toward this)
+bool m1Fwd    = true; // LEFT  – current direction
+
 int  m2Speed  = 0;    // RIGHT – current PWM
 int  m2Target = 0;    // RIGHT – desired PWM
+bool m2Fwd    = true; // RIGHT – current direction
 
 unsigned long lastRampMs = 0;
 unsigned long lastCmdMs  = 0;  // reset by every /drive command (watchdog)
@@ -155,7 +178,9 @@ static const char HTML[] PROGMEM = R"rawliteral(
               onpointercancel="release(event)">&#9654;</button>
 
       <div class="empty"></div>
-      <div class="empty"></div>
+      <button id="btn-bwd"
+              onpointerdown="hold(event,'bwd')"   onpointerup="release(event)"
+              onpointercancel="release(event)">&#9660;</button>
       <div class="empty"></div>
     </div>
   </div>
@@ -217,9 +242,16 @@ static const char HTML[] PROGMEM = R"rawliteral(
 )rawliteral";
 
 // ── Helpers ──────────────────────────────────────────────────
-// PWM write – inverts duty cycle for active-LOW MOSFET modules
+// Set L298N direction pins for one motor
+static inline void setMotorDir(int in1, int in2, bool forward, bool invert) {
+    bool fwd = forward ^ invert;
+    digitalWrite(in1, fwd ? HIGH : LOW);
+    digitalWrite(in2, fwd ? LOW  : HIGH);
+}
+
+// PWM write (L298N ENA/ENB: HIGH duty = more speed)
 static inline void pwmWrite(int pin, int duty) {
-    ledcWrite(pin, MOSFET_INVERT ? (255 - duty) : duty);
+    ledcWrite(pin, duty);
 }
 
 // Immediately cut a motor to 0 (bypasses ramp)
@@ -245,11 +277,11 @@ void rampMotors() {
 
     if (m1Speed != m1Target) {
         m1Speed = step(m1Speed, m1Target);
-        pwmWrite(M1_PWM_PIN, m1Speed);
+        pwmWrite(M1_ENA, m1Speed);
     }
     if (m2Speed != m2Target) {
         m2Speed = step(m2Speed, m2Target);
-        pwmWrite(M2_PWM_PIN, m2Speed);
+        pwmWrite(M2_ENB, m2Speed);
     }
 }
 
@@ -275,16 +307,8 @@ void handleSpeed() {
 }
 
 void handleStop() {
-    if (!server.hasArg("motor")) {
-        // No motor specified – stop both
-        motorCut(M1_PWM_PIN, m1Speed, m1Target);
-        motorCut(M2_PWM_PIN, m2Speed, m2Target);
-    } else {
-        int motor = server.arg("motor").toInt();
-        if (motor == 1)      motorCut(M1_PWM_PIN, m1Speed, m1Target);
-        else if (motor == 2) motorCut(M2_PWM_PIN, m2Speed, m2Target);
-        else { server.send(400, "text/plain", "Invalid motor"); return; }
-    }
+    motorCut(M1_ENA, m1Speed, m1Target);
+    motorCut(M2_ENB, m2Speed, m2Target);
     server.send(200, "text/plain", "OK");
 }
 
@@ -296,30 +320,44 @@ void handleDrive() {
     String cmd = server.arg("cmd");
 
     // Whitelist valid commands to prevent injection
-    if (cmd != "fwd" && cmd != "left" && cmd != "right" && cmd != "stop") {
+    if (cmd != "fwd" && cmd != "bwd" && cmd != "left" &&
+        cmd != "right" && cmd != "stop") {
         server.send(400, "text/plain", "Invalid command");
         return;
     }
 
     lastCmdMs = millis();   // reset watchdog
 
-    //   fwd   → both motors run
-    //   left  → left motor stops,  right motor runs  (skid-steer left)
-    //   right → left motor runs,   right motor stops (skid-steer right)
-    //   stop  → both motors stop
-    if (cmd == "fwd") {
-        m1Target = driveSpeed;
-        m2Target = driveSpeed;
-    } else if (cmd == "left") {
-        m1Target = 0;
-        m2Target = driveSpeed;
-    } else if (cmd == "right") {
-        m1Target = driveSpeed;
-        m2Target = 0;
-    } else {
+    if (cmd == "stop") {
         m1Target = 0;
         m2Target = 0;
+        server.send(200, "text/plain", "OK");
+        return;
     }
+
+    //   fwd   → left:fwd   right:fwd    (straight forward)
+    //   bwd   → left:bwd   right:bwd    (straight backward)
+    //   left  → left:bwd   right:fwd    (pivot left)
+    //   right → left:fwd   right:bwd    (pivot right)
+    bool newM1Fwd = (cmd == "fwd" || cmd == "right");
+    bool newM2Fwd = (cmd == "fwd" || cmd == "left");
+
+    // Change direction if needed – cut speed first to protect the H-bridge
+    if (m1Fwd != newM1Fwd) {
+        motorCut(M1_ENA, m1Speed, m1Target);
+        delay(DIR_CHANGE_DELAY_MS);
+        m1Fwd = newM1Fwd;
+        setMotorDir(M1_IN1, M1_IN2, newM1Fwd, LEFT_INVERT);
+    }
+    if (m2Fwd != newM2Fwd) {
+        motorCut(M2_ENB, m2Speed, m2Target);
+        delay(DIR_CHANGE_DELAY_MS);
+        m2Fwd = newM2Fwd;
+        setMotorDir(M2_IN3, M2_IN4, newM2Fwd, RIGHT_INVERT);
+    }
+
+    m1Target = driveSpeed;
+    m2Target = driveSpeed;
 
     server.send(200, "text/plain", "OK");
 }
@@ -328,8 +366,8 @@ void handleDrive() {
 void checkWatchdog() {
     if ((m1Target > 0 || m2Target > 0) &&
         (millis() - lastCmdMs > WATCHDOG_MS)) {
-        motorCut(M1_PWM_PIN, m1Speed, m1Target);
-        motorCut(M2_PWM_PIN, m2Speed, m2Target);
+        motorCut(M1_ENA, m1Speed, m1Target);
+        motorCut(M2_ENB, m2Speed, m2Target);
         Serial.println("WATCHDOG: motors stopped");
     }
 }
@@ -342,12 +380,18 @@ void handleNotFound() {
 void setup() {
     Serial.begin(115200);
 
-    // PWM channels (Core v3.x: pin-based, no channel numbers)
-    ledcAttach(M1_PWM_PIN, PWM_FREQ, PWM_RESOLUTION);
-    pwmWrite(M1_PWM_PIN, 0);
+    // Direction pins – start both motors in forward direction
+    pinMode(M1_IN1, OUTPUT); pinMode(M1_IN2, OUTPUT);
+    pinMode(M2_IN3, OUTPUT); pinMode(M2_IN4, OUTPUT);
+    setMotorDir(M1_IN1, M1_IN2, true, LEFT_INVERT);
+    setMotorDir(M2_IN3, M2_IN4, true, RIGHT_INVERT);
 
-    ledcAttach(M2_PWM_PIN, PWM_FREQ, PWM_RESOLUTION);
-    pwmWrite(M2_PWM_PIN, 0);
+    // Speed PWM (Core v3.x: pin-based, no channel numbers)
+    ledcAttach(M1_ENA, PWM_FREQ, PWM_RESOLUTION);
+    pwmWrite(M1_ENA, 0);
+
+    ledcAttach(M2_ENB, PWM_FREQ, PWM_RESOLUTION);
+    pwmWrite(M2_ENB, 0);
 
     // Start WiFi Access Point
     WiFi.softAP(AP_SSID, AP_PASSWORD);
