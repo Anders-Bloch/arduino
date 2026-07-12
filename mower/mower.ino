@@ -459,6 +459,10 @@ void setup() {
     pwmWrite(M2_ENB, 0);
 
     // Cutter PWM (XY-MOS)
+    // Drive pin LOW first so the MOSFET stays off during the brief
+    // window between power-on and ledcAttach taking control of the pin.
+    pinMode(CUTTER_PIN, OUTPUT);
+    digitalWrite(CUTTER_PIN, LOW);
     ledcAttach(CUTTER_PIN, PWM_FREQ, PWM_RESOLUTION);
     ledcWrite(CUTTER_PIN, 0);
 
