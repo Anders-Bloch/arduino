@@ -33,12 +33,14 @@
  *  NOTE: L298N logic runs on 5 V – 3.3 V ESP32 signals are usually sufficient.
  *  If a motor runs the wrong way, swap its two L298N OUT wires.
  *
- *  CUTTER motor (XY-MOS MOSFET module)
- *    ESP32 GPIO 13  → XY-MOS PWM input  (speed 0–100 %)
- *    XY-MOS OUT+    → Cutter motor +
- *    XY-MOS OUT−    → Cutter motor −
- *    XY-MOS GND     → Battery− / ESP32 GND  (common ground)
- *    12 V Battery+  → XY-MOS VIN+
+ *  CUTTER motor (single-channel relay module + 6 V supply)
+ *    ESP32 GPIO 13  → Relay IN  (HIGH = relay on = motor runs)
+ *    Relay VCC      → ESP32 3.3 V or 5 V (check module label)
+ *    Relay GND      → ESP32 GND
+ *    Relay COM      → 6 V Battery+
+ *    Relay NO       → Cutter motor +
+ *    Cutter motor − → 6 V Battery−
+ *    NOTE: if your relay module is active-LOW, set CUTTER_RELAY_ON = LOW below.
  * Compatible with ESP32 Arduino Core v3.x
  * Board in Arduino IDE: "ESP32 Dev Module"
  * ──────────────────────────────────────────────────────────────
@@ -62,8 +64,9 @@ const int M2_ENB = 32;   // ENB  – PWM speed
 const int M2_IN3 = 33;   // IN3  – direction
 const int M2_IN4 = 14;   // IN4  – direction
 
-//  CUTTER motor – XY-MOS MOSFET module
-const int CUTTER_PIN = 13;  // PWM → XY-MOS signal input
+//  CUTTER motor – relay module
+const int  CUTTER_PIN      = 13;   // Relay IN signal
+const bool CUTTER_RELAY_ON = HIGH; // HIGH for active-HIGH modules; LOW for active-LOW
 
 // If a motor runs the wrong way, set its flag to true
 // (swaps IN1/IN2 or IN3/IN4 in software instead of rewiring).
@@ -87,7 +90,7 @@ const unsigned long WATCHDOG_MS = 2000;
 // Set to false for standard active-HIGH modules.
 const bool MOSFET_INVERT = true;
 
-// ── Soft-start ramp ──────────────────────────────────────────
+// ── Soft-start ramp (drive motors) ─────────────────────────────
 const int RAMP_UP_STEP   = 20;   // PWM units per tick when accelerating (0–255)
 const int RAMP_DOWN_STEP = 30;   // PWM units per tick when decelerating
 const int RAMP_TICK_MS   = 10;   // ms between ramp ticks
@@ -106,7 +109,7 @@ bool m2Fwd    = true; // RIGHT – current direction
 unsigned long lastRampMs = 0;
 unsigned long lastCmdMs  = 0;  // reset by every /drive command (watchdog)
 
-int cutterSpeed = 0;  // CUTTER – current PWM (0–255); 0 = off
+bool cutterRelayOn = false;  // CUTTER – relay state
 
 WebServer server(80);
 
@@ -155,9 +158,8 @@ static const char HTML[] PROGMEM = R"rawliteral(
     .empty    {background:transparent !important;pointer-events:none}
     /* Cutter */
     .ctrow{display:flex;align-items:center;gap:12px;margin-bottom:8px}
-    .ctrow input[type=range]{flex:1}
-    #cutter-btn{min-width:80px;padding:8px 12px;border:none;border-radius:8px;
-                font-size:.9rem;font-weight:700;cursor:pointer;touch-action:none;
+    #cutter-btn{width:100%;padding:12px;border:none;border-radius:8px;
+                font-size:1rem;font-weight:700;cursor:pointer;touch-action:none;
                 background:#132b13;color:var(--green)}
     #cutter-btn.on{background:#3fb950;color:#0d1117}
     /* Emergency stop */
@@ -209,8 +211,6 @@ static const char HTML[] PROGMEM = R"rawliteral(
     <div class="srow"><span>&#9881; Cutter</span><span id="cv">OFF</span></div>
     <div class="ctrow">
       <button id="cutter-btn" onpointerdown="toggleCutter()">OFF</button>
-      <input type="range" min="10" max="100" value="75" id="cl"
-             oninput="setCutterSpd(this.value)" onchange="setCutterSpd(this.value)">
     </div>
   </div>
 
@@ -266,17 +266,10 @@ static const char HTML[] PROGMEM = R"rawliteral(
     function toggleCutter(){
       cutterOn = !cutterOn;
       const btn = document.getElementById('cutter-btn');
-      const spd = document.getElementById('cl').value;
       btn.textContent = cutterOn ? 'ON' : 'OFF';
       btn.classList.toggle('on', cutterOn);
-      document.getElementById('cv').innerText = cutterOn ? spd + ' %' : 'OFF';
-      get('/cutter?val=' + (cutterOn ? spd : '0'));
-    }
-
-    function setCutterSpd(v){
-      if(!cutterOn) return;
-      document.getElementById('cv').innerText = v + ' %';
-      get('/cutter?val=' + v);
+      document.getElementById('cv').innerText = cutterOn ? 'ON' : 'OFF';
+      get('/cutter?val=' + (cutterOn ? '1' : '0'));
     }
 
     function eStop(){
@@ -365,9 +358,8 @@ void handleCutter() {
         server.send(400, "text/plain", "Bad Request");
         return;
     }
-    int pct = constrain(server.arg("val").toInt(), 0, 100);
-    cutterSpeed = map(pct, 0, 100, 0, 255);
-    ledcWrite(CUTTER_PIN, cutterSpeed);
+    cutterRelayOn = server.arg("val").toInt() != 0;
+    digitalWrite(CUTTER_PIN, cutterRelayOn ? CUTTER_RELAY_ON : !CUTTER_RELAY_ON);
     server.send(200, "text/plain", "OK");
 }
 
@@ -458,13 +450,9 @@ void setup() {
     ledcAttach(M2_ENB, PWM_FREQ, PWM_RESOLUTION);
     pwmWrite(M2_ENB, 0);
 
-    // Cutter PWM (XY-MOS)
-    // Drive pin LOW first so the MOSFET stays off during the brief
-    // window between power-on and ledcAttach taking control of the pin.
+    // Cutter relay – ensure relay is off at startup
     pinMode(CUTTER_PIN, OUTPUT);
-    digitalWrite(CUTTER_PIN, LOW);
-    ledcAttach(CUTTER_PIN, PWM_FREQ, PWM_RESOLUTION);
-    ledcWrite(CUTTER_PIN, 0);
+    digitalWrite(CUTTER_PIN, !CUTTER_RELAY_ON);
 
     // Start WiFi Access Point
     WiFi.softAP(AP_SSID, AP_PASSWORD);
