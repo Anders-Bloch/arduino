@@ -32,6 +32,13 @@
  *  ESP32 GND  → L298N GND  (common ground)
  *  NOTE: L298N logic runs on 5 V – 3.3 V ESP32 signals are usually sufficient.
  *  If a motor runs the wrong way, swap its two L298N OUT wires.
+ *
+ *  CUTTER motor (XY-MOS MOSFET module)
+ *    ESP32 GPIO 13  → XY-MOS PWM input  (speed 0–100 %)
+ *    XY-MOS OUT+    → Cutter motor +
+ *    XY-MOS OUT−    → Cutter motor −
+ *    XY-MOS GND     → Battery− / ESP32 GND  (common ground)
+ *    12 V Battery+  → XY-MOS VIN+
  * Compatible with ESP32 Arduino Core v3.x
  * Board in Arduino IDE: "ESP32 Dev Module"
  * ──────────────────────────────────────────────────────────────
@@ -54,6 +61,9 @@ const int M1_IN2 = 27;   // IN2  – direction
 const int M2_ENB = 32;   // ENB  – PWM speed
 const int M2_IN3 = 33;   // IN3  – direction
 const int M2_IN4 = 14;   // IN4  – direction
+
+//  CUTTER motor – XY-MOS MOSFET module
+const int CUTTER_PIN = 13;  // PWM → XY-MOS signal input
 
 // If a motor runs the wrong way, set its flag to true
 // (swaps IN1/IN2 or IN3/IN4 in software instead of rewiring).
@@ -78,9 +88,9 @@ const unsigned long WATCHDOG_MS = 2000;
 const bool MOSFET_INVERT = true;
 
 // ── Soft-start ramp ──────────────────────────────────────────
-const int RAMP_UP_STEP   = 3;    // PWM units per tick when accelerating (0–255)
-const int RAMP_DOWN_STEP = 6;    // PWM units per tick when decelerating
-const int RAMP_TICK_MS   = 15;   // ms between ramp ticks
+const int RAMP_UP_STEP   = 20;   // PWM units per tick when accelerating (0–255)
+const int RAMP_DOWN_STEP = 30;   // PWM units per tick when decelerating
+const int RAMP_TICK_MS   = 10;   // ms between ramp ticks
 
 // ── Runtime state ────────────────────────────────────────────
 int  driveSpeed = 128;   // shared speed for both motors (0–255, default 50 %)
@@ -95,6 +105,8 @@ bool m2Fwd    = true; // RIGHT – current direction
 
 unsigned long lastRampMs = 0;
 unsigned long lastCmdMs  = 0;  // reset by every /drive command (watchdog)
+
+int cutterSpeed = 0;  // CUTTER – current PWM (0–255); 0 = off
 
 WebServer server(80);
 
@@ -141,6 +153,13 @@ static const char HTML[] PROGMEM = R"rawliteral(
     #btn-right{background:#13202b;color:var(--accent)}
     .btn-stp  {background:#2b2510 !important;color:var(--orange) !important}
     .empty    {background:transparent !important;pointer-events:none}
+    /* Cutter */
+    .ctrow{display:flex;align-items:center;gap:12px;margin-bottom:8px}
+    .ctrow input[type=range]{flex:1}
+    #cutter-btn{min-width:80px;padding:8px 12px;border:none;border-radius:8px;
+                font-size:.9rem;font-weight:700;cursor:pointer;touch-action:none;
+                background:#132b13;color:var(--green)}
+    #cutter-btn.on{background:#3fb950;color:#0d1117}
     /* Emergency stop */
     .estop{width:100%;padding:18px;background:#7f1d1d;color:#fff;
            border:2px solid #991b1b;border-radius:10px;font-size:1.1rem;
@@ -185,6 +204,16 @@ static const char HTML[] PROGMEM = R"rawliteral(
     </div>
   </div>
 
+  <!-- Cutter -->
+  <div class="card">
+    <div class="srow"><span>&#9881; Cutter</span><span id="cv">OFF</span></div>
+    <div class="ctrow">
+      <button id="cutter-btn" onpointerdown="toggleCutter()">OFF</button>
+      <input type="range" min="10" max="100" value="75" id="cl"
+             oninput="setCutterSpd(this.value)" onchange="setCutterSpd(this.value)">
+    </div>
+  </div>
+
   <button class="estop" onpointerdown="eStop()">
     &#9888;&nbsp; EMERGENCY STOP
   </button>
@@ -192,7 +221,7 @@ static const char HTML[] PROGMEM = R"rawliteral(
   <script>
     let holdTimer = null;
     let activeCmd = null;
-    const REPEAT_MS = 350;  // re-send command while button is held
+    const REPEAT_MS = 150;  // re-send command while button is held
 
     function get(u){fetch(u).catch(()=>{})}
 
@@ -232,8 +261,33 @@ static const char HTML[] PROGMEM = R"rawliteral(
       get('/drive?cmd=stop');
     }
 
+    let cutterOn = false;
+
+    function toggleCutter(){
+      cutterOn = !cutterOn;
+      const btn = document.getElementById('cutter-btn');
+      const spd = document.getElementById('cl').value;
+      btn.textContent = cutterOn ? 'ON' : 'OFF';
+      btn.classList.toggle('on', cutterOn);
+      document.getElementById('cv').innerText = cutterOn ? spd + ' %' : 'OFF';
+      get('/cutter?val=' + (cutterOn ? spd : '0'));
+    }
+
+    function setCutterSpd(v){
+      if(!cutterOn) return;
+      document.getElementById('cv').innerText = v + ' %';
+      get('/cutter?val=' + v);
+    }
+
     function eStop(){
       release(null);
+      // Also stop cutter on emergency stop
+      cutterOn = false;
+      const btn = document.getElementById('cutter-btn');
+      btn.textContent = 'OFF';
+      btn.classList.remove('on');
+      document.getElementById('cv').innerText = 'OFF';
+      get('/cutter?val=0');
       get('/stop');
     }
   </script>
@@ -306,6 +360,17 @@ void handleSpeed() {
     server.send(200, "text/plain", "OK");
 }
 
+void handleCutter() {
+    if (!server.hasArg("val")) {
+        server.send(400, "text/plain", "Bad Request");
+        return;
+    }
+    int pct = constrain(server.arg("val").toInt(), 0, 100);
+    cutterSpeed = map(pct, 0, 100, 0, 255);
+    ledcWrite(CUTTER_PIN, cutterSpeed);
+    server.send(200, "text/plain", "OK");
+}
+
 void handleStop() {
     motorCut(M1_ENA, m1Speed, m1Target);
     motorCut(M2_ENB, m2Speed, m2Target);
@@ -337,10 +402,10 @@ void handleDrive() {
 
     //   fwd   → left:fwd   right:fwd    (straight forward)
     //   bwd   → left:bwd   right:bwd    (straight backward)
-    //   left  → left:bwd   right:fwd    (pivot left)
-    //   right → left:fwd   right:bwd    (pivot right)
-    bool newM1Fwd = (cmd == "fwd" || cmd == "right");
-    bool newM2Fwd = (cmd == "fwd" || cmd == "left");
+    //   left  → left:fwd   right:bwd    (pivot left)
+    //   right → left:bwd   right:fwd    (pivot right)
+    bool newM1Fwd = (cmd == "fwd" || cmd == "left");
+    bool newM2Fwd = (cmd == "fwd" || cmd == "right");
 
     // Change direction if needed – cut speed first to protect the H-bridge
     if (m1Fwd != newM1Fwd) {
@@ -393,6 +458,10 @@ void setup() {
     ledcAttach(M2_ENB, PWM_FREQ, PWM_RESOLUTION);
     pwmWrite(M2_ENB, 0);
 
+    // Cutter PWM (XY-MOS)
+    ledcAttach(CUTTER_PIN, PWM_FREQ, PWM_RESOLUTION);
+    ledcWrite(CUTTER_PIN, 0);
+
     // Start WiFi Access Point
     WiFi.softAP(AP_SSID, AP_PASSWORD);
     IPAddress ip = WiFi.softAPIP();
@@ -400,10 +469,11 @@ void setup() {
                   AP_SSID, ip.toString().c_str(), ip.toString().c_str());
 
     // Register HTTP routes
-    server.on("/",      HTTP_GET, handleRoot);
-    server.on("/speed", HTTP_GET, handleSpeed);
-    server.on("/drive", HTTP_GET, handleDrive);
-    server.on("/stop",  HTTP_GET, handleStop);
+    server.on("/",       HTTP_GET, handleRoot);
+    server.on("/speed",  HTTP_GET, handleSpeed);
+    server.on("/drive",  HTTP_GET, handleDrive);
+    server.on("/stop",   HTTP_GET, handleStop);
+    server.on("/cutter", HTTP_GET, handleCutter);
     server.onNotFound(handleNotFound);
     server.begin();
     Serial.println("HTTP server started.");
